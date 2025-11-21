@@ -3,7 +3,10 @@ const admin = require('firebase-admin');
 
 // Coolify'da ayarlayacağımız "Environment Variable"dan anahtarı alıyoruz.
 // Bu sayede şifreli dosyanı koda gömmemiş oluyoruz (Güvenlik!).
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+// Base64 decode ediyoruz çünkü Coolify environment variable'da JSON escape sorunları yaşanıyor
+const serviceAccount = JSON.parse(
+    Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf-8')
+);
 
 // Firebase'i Başlat
 admin.initializeApp({
