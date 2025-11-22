@@ -1,106 +1,100 @@
 const WebSocket = require('ws');
 const admin = require('firebase-admin');
+const http = require('http');
 
-// Coolify'da ayarlayacağımız "Environment Variable"dan anahtarı alıyoruz.
-// Bu sayede şifreli dosyanı koda gömmemiş oluyoruz (Güvenlik!).
-// Base64 decode ediyoruz çünkü Coolify environment variable'da JSON escape sorunları yaşanıyor
+// Firebase Admin SDK - Environment Variable'dan Base64 decode
 const serviceAccount = JSON.parse(
     Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf-8')
 );
 
-// Firebase'i Başlat
+// Firebase Başlat
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
-    // Proje ID'sini otomatik algılayıp URL'yi oluşturuyoruz
     databaseURL: `https://${serviceAccount.project_id}-default-rtdb.europe-west1.firebasedatabase.app`
 });
 
 const db = admin.database();
-const wss = new WebSocket.Server({ port: 8080 });
 
-// Bağlı olan cihazları hafızada tutacağız (RAM)
-// Format: { "DEVICE_ID": WebSocket_Bağlantısı }
-const devices = new Map();
+// Bağlı cihazlar ve Firebase listener'ları
+const devices = new Map();           // deviceId -> WebSocket
+const deviceListeners = new Map();   // deviceId -> Firebase listener reference
 
-console.log('🚀 Grokel Monolith (WebSocket Bridge) is starting on port 8080...');
+// HTTP server (healthcheck için)
+const server = http.createServer((req, res) => {
+    if (req.url === '/' || req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'ok',
+            connections: devices.size,
+            timestamp: new Date().toISOString()
+        }));
+    } else {
+        res.writeHead(404);
+        res.end('Not found');
+    }
+});
 
-// --- 1. ESP32 BAĞLANDIĞINDA ---
+// WebSocket Server
+const wss = new WebSocket.Server({ server });
+
+console.log('🚀 Grokel WebSocket Bridge starting on port 8080...');
+
+// ESP32 Bağlandığında
 wss.on('connection', (ws, req) => {
-    // URL'den Device ID'yi çekiyoruz
-    // Örnek Bağlantı: ws://sunucu_ip:8080/?id=D46CF0
-    const parameters = new URLSearchParams(req.url.replace('/?', ''));
-    const deviceId = parameters.get('id');
+    const deviceId = new URLSearchParams(req.url.replace('/?', '')).get('id');
 
     if (!deviceId) {
-        console.log('❌ Rejected: No Device ID provided.');
+        console.log('❌ Rejected: No Device ID');
         ws.close();
         return;
     }
 
-    // Cihazı haritaya kaydet (Artık ona ulaşabiliriz)
     devices.set(deviceId, ws);
     ws.isAlive = true;
-    ws.deviceId = deviceId;
+    console.log('Device connected:', deviceId);
 
-    console.log(`✅ Device Connected: ${deviceId}`);
+    // Per-device Firebase listener (OPTIMIZED)
+    const colorRef = db.ref(`devices/${deviceId}/desiredState/color`);
 
-    // Bağlantı koparsa listeden sil
-    ws.on('close', () => {
-        console.log(`⚠️ Device Disconnected: ${deviceId}`);
-        devices.delete(deviceId);
-    });
-
-    // Heartbeat (Kalp Atışı) - Bağlantının canlı olduğunu teyit et
-    ws.on('pong', () => { ws.isAlive = true; });
-
-    // --- İLK SENKRONİZASYON (SYNC) ---
-    // Cihaz ilk açıldığında en son hangi renkte kaldıysa onu gönder.
-    // Böylece elektrik gidip gelince lamba eski rengine döner.
-    db.ref(`devices/${deviceId}/desiredState/color`).once('value', (snapshot) => {
+    // İlk rengi gönder
+    colorRef.once('value', (snapshot) => {
         if (snapshot.exists()) {
             const color = snapshot.val();
-            console.log(`🔄 Syncing initial state to ${deviceId}:`, color);
-
-            // ESP32'ye gönder (JSON formatında)
-            ws.send(JSON.stringify({
-                type: 'color',
-                data: color
-            }));
+            ws.send(JSON.stringify({ type: 'color', data: color }));
+            console.log('Initial color sent to', deviceId, ':', JSON.stringify(color));
         }
+    });
+
+    // Real-time color değişikliklerini dinle (SADECE BU CİHAZ İÇİN)
+    const onColorChange = (snapshot) => {
+        if (ws.readyState === WebSocket.OPEN && snapshot.exists()) {
+            const color = snapshot.val();
+            ws.send(JSON.stringify({ type: 'color', data: color }));
+            console.log('Color changed for', deviceId, ':', JSON.stringify(color));
+        }
+    };
+
+    colorRef.on('value', onColorChange);
+    deviceListeners.set(deviceId, { ref: colorRef, callback: onColorChange });
+
+    // Bağlantı koptuğunda cleanup (MEMORY LEAK ÖNLEMİ)
+    ws.on('close', () => {
+        const listener = deviceListeners.get(deviceId);
+        if (listener) {
+            listener.ref.off('value', listener.callback);
+            deviceListeners.delete(deviceId);
+        }
+        devices.delete(deviceId);
+        console.log('Device disconnected:', deviceId);
+    });
+
+    // Heartbeat
+    ws.on('pong', () => {
+        ws.isAlive = true;
     });
 });
 
-// --- 2. FIREBASE'İ DİNLE (Anlık Tepki) ---
-// 'devices' altındaki herhangi bir değişiklikte burası tetiklenir.
-// Mobil uygulamadan renk değiştirdiğin AN burası çalışır.
-db.ref('devices').on('child_changed', (snapshot) => {
-    const deviceId = snapshot.key; // Hangi cihaz değişti?
-    const data = snapshot.val();   // Yeni veri ne?
-
-    // Eğer renk verisi varsa ve bu cihaz şu an bize bağlıysa...
-    if (data && data.desiredState && data.desiredState.color) {
-        const clientWs = devices.get(deviceId);
-
-        if (clientWs && clientWs.readyState === WebSocket.OPEN) {
-            console.log(`🎨 Color Update for ${deviceId} -> Pushing to ESP32 ⚡`);
-
-            // ESP32'ye veriyi İT (PUSH)
-            // Bu işlem milisaniyeler sürer. HTTP Polling gibi bekleme yoktur.
-            const payload = JSON.stringify({
-                type: 'color',
-                data: data.desiredState.color
-            });
-
-            clientWs.send(payload);
-        } else {
-            console.log(`💤 Color changed for ${deviceId}, but device is OFFLINE.`);
-        }
-    }
-});
-
-// --- 3. KEEP-ALIVE (Bağlantı Sağlığı) ---
-// Her 30 saniyede bir tüm cihazları dürt: "Orada mısın?"
-// Cevap vermeyen ölü bağlantıları temizle.
+// Keep-Alive (30 saniyede bir ping)
 setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
@@ -108,3 +102,6 @@ setInterval(() => {
         ws.ping();
     });
 }, 30000);
+
+console.log('✅ Grokel WebSocket Bridge ready on port 8080');
+server.listen(8080);
