@@ -53,29 +53,33 @@ wss.on('connection', (ws, req) => {
     ws.isAlive = true;
     console.log('Device connected:', deviceId);
 
-    // Per-device Firebase listener (OPTIMIZED)
-    const colorRef = db.ref(`devices/${deviceId}/desiredState/color`);
+    // Per-device Firebase listener - Listen to parent path to catch all updates
+    const stateRef = db.ref(`devices/${deviceId}/desiredState`);
 
-    // İlk rengi gönder
-    colorRef.once('value', (snapshot) => {
+    // İlk state'i gönder
+    stateRef.once('value', (snapshot) => {
         if (snapshot.exists()) {
-            const color = snapshot.val();
-            ws.send(JSON.stringify({ type: 'color', data: color }));
-            console.log('Initial color sent to', deviceId, ':', JSON.stringify(color));
+            const state = snapshot.val();
+            if (state.color) {
+                ws.send(JSON.stringify({ type: 'color', data: state.color }));
+                console.log('Initial color sent to', deviceId, ':', JSON.stringify(state.color));
+            }
         }
     });
 
-    // Real-time color değişikliklerini dinle (SADECE BU CİHAZ İÇİN)
-    const onColorChange = (snapshot) => {
+    // Real-time state değişikliklerini dinle (PARENT PATH - tüm update'leri yakala)
+    const onStateChange = (snapshot) => {
         if (ws.readyState === WebSocket.OPEN && snapshot.exists()) {
-            const color = snapshot.val();
-            ws.send(JSON.stringify({ type: 'color', data: color }));
-            console.log('Color changed for', deviceId, ':', JSON.stringify(color));
+            const state = snapshot.val();
+            if (state.color) {
+                ws.send(JSON.stringify({ type: 'color', data: state.color }));
+                console.log('✅ Color changed for', deviceId, ':', JSON.stringify(state.color));
+            }
         }
     };
 
-    colorRef.on('value', onColorChange);
-    deviceListeners.set(deviceId, { ref: colorRef, callback: onColorChange });
+    stateRef.on('value', onStateChange);
+    deviceListeners.set(deviceId, { ref: stateRef, callback: onStateChange });
 
     // Bağlantı koptuğunda cleanup (MEMORY LEAK ÖNLEMİ)
     ws.on('close', () => {
