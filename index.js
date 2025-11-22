@@ -53,8 +53,9 @@ wss.on('connection', (ws, req) => {
     ws.isAlive = true;
     console.log('Device connected:', deviceId);
 
-    // Per-device Firebase listener - Listen to parent path to catch all updates
+    // Per-device Firebase listeners - Listen to both desiredState AND preview
     const stateRef = db.ref(`devices/${deviceId}/desiredState`);
+    const previewRef = db.ref(`devices/${deviceId}/preview`);
 
     // İlk state'i gönder
     stateRef.once('value', (snapshot) => {
@@ -67,25 +68,46 @@ wss.on('connection', (ws, req) => {
         }
     });
 
-    // Real-time state değişikliklerini dinle (PARENT PATH - tüm update'leri yakala)
+    // Real-time desiredState değişikliklerini dinle
     const onStateChange = (snapshot) => {
         if (ws.readyState === WebSocket.OPEN && snapshot.exists()) {
             const state = snapshot.val();
             if (state.color) {
                 ws.send(JSON.stringify({ type: 'color', data: state.color }));
-                console.log('✅ Color changed for', deviceId, ':', JSON.stringify(state.color));
+                console.log('✅ desiredState color for', deviceId, ':', JSON.stringify(state.color));
+            }
+        }
+    };
+
+    // Real-time preview değişikliklerini dinle (Flutter Preview Mode)
+    const onPreviewChange = (snapshot) => {
+        if (ws.readyState === WebSocket.OPEN && snapshot.exists()) {
+            const preview = snapshot.val();
+            // Preview has direct RGB structure
+            if (preview.r !== undefined && preview.g !== undefined && preview.b !== undefined) {
+                const color = { r: preview.r, g: preview.g, b: preview.b };
+                ws.send(JSON.stringify({ type: 'color', data: color }));
+                console.log('🎨 preview color for', deviceId, ':', JSON.stringify(color));
             }
         }
     };
 
     stateRef.on('value', onStateChange);
-    deviceListeners.set(deviceId, { ref: stateRef, callback: onStateChange });
+    previewRef.on('value', onPreviewChange);
+
+    // Store both listeners for cleanup
+    deviceListeners.set(deviceId, {
+        state: { ref: stateRef, callback: onStateChange },
+        preview: { ref: previewRef, callback: onPreviewChange }
+    });
 
     // Bağlantı koptuğunda cleanup (MEMORY LEAK ÖNLEMİ)
     ws.on('close', () => {
-        const listener = deviceListeners.get(deviceId);
-        if (listener) {
-            listener.ref.off('value', listener.callback);
+        const listeners = deviceListeners.get(deviceId);
+        if (listeners) {
+            // Clean up both desiredState and preview listeners
+            listeners.state.ref.off('value', listeners.state.callback);
+            listeners.preview.ref.off('value', listeners.preview.callback);
             deviceListeners.delete(deviceId);
         }
         devices.delete(deviceId);
