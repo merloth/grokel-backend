@@ -86,8 +86,8 @@ wss.on('connection', (ws, req) => {
             // Preview has direct RGB structure
             if (preview.r !== undefined && preview.g !== undefined && preview.b !== undefined) {
                 const color = { r: preview.r, g: preview.g, b: preview.b };
-                ws.send(JSON.stringify({ type: 'color', data: color }));
-                console.log('🎨 preview color for', deviceId, ':', JSON.stringify(color));
+                ws.send(JSON.stringify({ type: 'preview', data: color })); // Apple-style: preview keeps breathing
+                console.log('🎨 PREVIEW mode for', deviceId, ':', JSON.stringify(color));
             }
         }
     };
