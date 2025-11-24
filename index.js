@@ -1,6 +1,7 @@
 const WebSocket = require('ws');
 const admin = require('firebase-admin');
 const http = require('http');
+const { createSetColorPacket, createOfflinePacket, createHeartbeatPacket, logPacket } = require('./grokel_protocol');
 
 // Firebase Admin SDK - Environment Variable'dan Base64 decode
 const serviceAccount = JSON.parse(
@@ -57,37 +58,39 @@ wss.on('connection', (ws, req) => {
     const stateRef = db.ref(`devices/${deviceId}/desiredState`);
     const previewRef = db.ref(`devices/${deviceId}/preview`);
 
-    // İlk state'i gönder
+    // İlk state'i gönder (V6.0 Binary Protocol)
     stateRef.once('value', (snapshot) => {
         if (snapshot.exists()) {
             const state = snapshot.val();
-            if (state.color) {
-                ws.send(JSON.stringify({ type: 'color', data: state.color }));
-                console.log('Initial color sent to', deviceId, ':', JSON.stringify(state.color));
+            if (state.color && state.color.r !== undefined && state.color.g !== undefined && state.color.b !== undefined) {
+                const binaryPacket = createSetColorPacket(state.color.r, state.color.g, state.color.b, 0);
+                ws.send(binaryPacket);
+                console.log('Initial color (binary) sent to', deviceId, ':', logPacket(binaryPacket));
             }
         }
     });
 
-    // Real-time desiredState değişikliklerini dinle
+    // Real-time desiredState değişikliklerini dinle (V6.0 Binary Protocol)
     const onStateChange = (snapshot) => {
         if (ws.readyState === WebSocket.OPEN && snapshot.exists()) {
             const state = snapshot.val();
-            if (state.color) {
-                ws.send(JSON.stringify({ type: 'color', data: state.color }));
-                console.log('✅ desiredState color for', deviceId, ':', JSON.stringify(state.color));
+            if (state.color && state.color.r !== undefined && state.color.g !== undefined && state.color.b !== undefined) {
+                const binaryPacket = createSetColorPacket(state.color.r, state.color.g, state.color.b, 0);
+                ws.send(binaryPacket);
+                console.log('✅ desiredState color (binary) for', deviceId, ':', logPacket(binaryPacket));
             }
         }
     };
 
-    // Real-time preview değişikliklerini dinle (Flutter Preview Mode)
+    // Real-time preview değişikliklerini dinle (V6.0 Binary Protocol - Flutter Preview Mode)
     const onPreviewChange = (snapshot) => {
         if (ws.readyState === WebSocket.OPEN && snapshot.exists()) {
             const preview = snapshot.val();
             // Preview has direct RGB structure
             if (preview.r !== undefined && preview.g !== undefined && preview.b !== undefined) {
-                const color = { r: preview.r, g: preview.g, b: preview.b };
-                ws.send(JSON.stringify({ type: 'preview', data: color })); // Apple-style: preview keeps breathing
-                console.log('🎨 PREVIEW mode for', deviceId, ':', JSON.stringify(color));
+                const binaryPacket = createSetColorPacket(preview.r, preview.g, preview.b, 0);
+                ws.send(binaryPacket);
+                console.log('🎨 PREVIEW mode (binary) for', deviceId, ':', logPacket(binaryPacket));
             }
         }
     };
